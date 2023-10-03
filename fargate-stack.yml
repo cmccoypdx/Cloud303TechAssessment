@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+
+Description: | 
+  Stack defining resources for a Fargate task that will retrieve one useless fact per minute from
+  https://uselessfacts.jsph.pl/api/v2/facts/random.
+
+
+Parameters:
+  pVpc:
+    Type: AWS::EC2::VPC::Id
+    Description: ID of VPC to run Fargate task within
+
+  pSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: ID of a subnet within VPC
+
+  pSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: |
+      ID of a second subnet within VPC. Select same subnet as A if only one subnet is desired.
+
+  pSecurityGroups:
+    Type: CommaDelimitedList
+    Description: |
+      Comma-separated list of network security groups to apply rules from. Limit 5. Leave empty
+      to use default security group.
+
+  pCpu:
+    Type: Number
+    Default: 256
+    Description: | 
+      Number of cpu units to reserve for container, in multiples or increments of 1024 (1024 = 
+      1vCPU).
+    AllowedValues:
+      - 256
+      - 512
+      - 1024
+      - 2048
+      - 4096
+
+  pMemory:
+    Type: String
+    Default: 512
+    Description: | 
+      Amount in GiB of memory to present to the container. Must be compatible with CPU selection,
+      see https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-cpu-memory-error.html.
+    AllowedValues:
+      - 512
+      - 1024
+      - 2048
+      - 3072
+      - 4096
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterLabels:
+      pVpc:
+        default: VPC ID
+      pSubnetA:
+        default: Subnet ID A
+      pSubnetB:
+        default: Subnet ID B
+      pSecurityGroups:
+        default: Security Groups
+      pCpu:
+        default: CPU Units
+      pMemory:
+        default: Memory in MiB
+
+    ParameterGroups:
+      - Label:
+          default: Network Settings
+        Parameters:
+          - pVpc
+          - pSubnetA
+          - pSubnetB
+          - pSecurityGroups
+      - Label:
+          default: | 
+            Container Resources
+        Parameters:
+          - pCpu
+          - pMemory
+
+
+Conditions:
+  CondDefaultSecurityGroup: !Equals ["", !Join ['', !Ref pSecurityGroups]]
+
+Resources:
+  ecsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders:
+        - FARGATE
+
+
+  ecsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+
+    # Make sure our log group is created before task can attempt to log to it
+    DependsOn: logGroup
+    Properties:
+      ContainerDefinitions:
+        - Name: !Sub ${AWS::StackName}Container
+
+          # https://hub.docker.com/r/badouralix/curl-jq/
+          Image: badouralix/curl-jq
+          EntryPoint: 
+            - /bin/sh
+            - -c
+          Command:
+            - curl https://uselessfacts.jsph.pl/api/v2/facts/random 2>/dev/null | jq '.text'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref logGroup
+              awslogs-stream-prefix: ecs
+      Cpu: !Ref pCpu
+      ExecutionRoleArn: !GetAtt ecsExecutionRole.Arn
+      Memory: !Ref pMemory
+
+      # awspvc mode is required for Fargate
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+
+
+  ecsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        # Managed policy granting common ECS task permissions, such as those used for logging
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+
+
+  logGroup:
+    Type: AWS::Logs::LogGroup
+
+      
+  eventSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Schedule for invoking our Fargate ECS task
+
+      # We want our task invoked every minute, so we don't want a flexible window for invocations
+      # with granularity in minutes.
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      ScheduleExpression: rate(1 minute)
+      Target:
+        Arn: !GetAtt ecsCluster.Arn
+        EcsParameters:
+          LaunchType: FARGATE
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              # Assumes ip addresses are not assigned by subnet. If they are, flip to DISABLED.
+              AssignPublicIp: ENABLED
+              Subnets:
+                - !Ref pSubnetA
+                - !Ref pSubnetB
+              
+              # If nothing is passed for security group parameter, use default, otherwise use param
+              SecurityGroups:
+                !If
+                  - CondDefaultSecurityGroup
+                  - !Ref "AWS::NoValue"
+                  - !Ref pSecurityGroups
+          TaskDefinitionArn: !Ref ecsTaskDefinition
+        RoleArn: !GetAtt eventScheduleRole.Arn
+
+  eventScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceEventsRole"
+
+
+Outputs:
+  logGroupName:
+    Description: Name of the log group that our task writes logs to
+    Value: !Ref logGroup
