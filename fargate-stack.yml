@@ -7,18 +7,15 @@ Description: |
 
 
 Parameters:
-  pVpc:
-    Type: AWS::EC2::VPC::Id
-    Description: ID of VPC to run Fargate task within
-
   pSubnetA:
     Type: AWS::EC2::Subnet::Id
-    Description: ID of a subnet within VPC
+    Description: ID of a subnet to be used by task containers.
 
   pSubnetB:
     Type: AWS::EC2::Subnet::Id
     Description: |
-      ID of a second subnet within VPC. Select same subnet as A if only one subnet is desired.
+      ID of a second subnet to be used by task containers. Select same subnet as A if only one
+      subnet is desired.
 
   pSecurityGroups:
     Type: CommaDelimitedList
@@ -56,8 +53,6 @@ Parameters:
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterLabels:
-      pVpc:
-        default: VPC ID
       pSubnetA:
         default: Subnet ID A
       pSubnetB:
@@ -73,7 +68,6 @@ Metadata:
       - Label:
           default: Network Settings
         Parameters:
-          - pVpc
           - pSubnetA
           - pSubnetB
           - pSecurityGroups
@@ -98,9 +92,6 @@ Resources:
 
   ecsTaskDefinition:
     Type: AWS::ECS::TaskDefinition
-
-    # Make sure our log group is created before task can attempt to log to it
-    DependsOn: logGroup
     Properties:
       ContainerDefinitions:
         - Name: !Sub ${AWS::StackName}Container
@@ -176,6 +167,7 @@ Resources:
                   - !Ref pSecurityGroups
           TaskDefinitionArn: !Ref ecsTaskDefinition
         RoleArn: !GetAtt eventScheduleRole.Arn
+
 
   eventScheduleRole:
     Type: AWS::IAM::Role
